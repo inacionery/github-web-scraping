@@ -26,7 +26,7 @@ public class ProjectServiceTest {
 	@Test
 	public void shouldReturnProject() throws Exception {
 		Project project = new Project(
-			Collections.singletonList(new File(15835L, "java", 738L)),
+			Collections.singletonList(new File(15835L, 2L, "java", 738L)),
 			"c01d29e0b02c33712c73ee6af81150c209b91541",
 			"inacionery/github-web-scraping");
 

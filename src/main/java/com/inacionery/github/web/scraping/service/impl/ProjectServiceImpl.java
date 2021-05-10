@@ -13,6 +13,7 @@ import com.inacionery.github.web.scraping.service.ProjectService;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,12 +26,26 @@ import org.springframework.stereotype.Service;
 public class ProjectServiceImpl implements ProjectService {
 
 	@Override
+	public Project addProject(String name) {
+		try {
+			ListenableFuture<Project> projectFuture =
+				queuedNames.computeIfAbsent(
+					name, this::createListenableFutureProject);
+
+			return projectFuture.get();
+		}
+		catch (ExecutionException | InterruptedException e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	@Override
 	public Project getProject(String name) {
 		return projectRepository.findByName(name);
 	}
 
 	@Override
-	public void saveProject(String name) {
+	public void updateProject(String name) {
 		queuedNames.computeIfAbsent(name, this::createListenableFutureProject);
 	}
 

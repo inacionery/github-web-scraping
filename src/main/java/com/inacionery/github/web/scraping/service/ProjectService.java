@@ -9,6 +9,8 @@ public interface ProjectService {
 
 	Project getProject(String name);
 
-	void saveProject(String name);
+	Project addProject(String name);
+
+	void updateProject(String name);
 
 }

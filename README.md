@@ -40,12 +40,6 @@ https://github-web-scraping.herokuapp.com
 ]
 ```
 
-###### HTTP Code 202
-
-```json
-Scraping on inacionery/github-web-scraping
-```
-
 ###### HTTP Code 400
 
 ```json

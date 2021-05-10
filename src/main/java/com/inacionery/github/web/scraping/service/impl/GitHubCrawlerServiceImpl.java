@@ -1,7 +1,5 @@
 package com.inacionery.github.web.scraping.service.impl;
 
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -14,18 +12,17 @@ import java.net.URL;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -34,9 +31,7 @@ import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.cache.annotation.CachePut;
-import org.springframework.cache.annotation.Cacheable;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
@@ -68,32 +63,6 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 		return null;
 	}
 
-	private ListenableFuture<Document> createListenableFutureProject(
-		String url) {
-
-		ListenableFuture<Document> future = executorService.submit(
-			() -> gitHubCrawlerServiceImpl.retrieveDocument(url));
-
-		Futures.addCallback(
-			future,
-			new FutureCallback<Document>() {
-
-				@Override
-				public void onFailure(Throwable throwable) {
-					queuedURLs.remove(url);
-				}
-
-				@Override
-				public void onSuccess(Document document) {
-					queuedURLs.remove(url);
-				}
-
-			},
-			executorService);
-
-		return future;
-	}
-
 	private BinaryOperator<File> fileBinaryOperator() {
 		return (file1, file2) -> new File(
 			Stream.of(
@@ -105,7 +74,7 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 			).orElse(
 				null
 			),
-			file1.getExtension(),
+			file1.getCount() + file2.getCount(), file1.getExtension(),
 			Stream.of(
 				file1.getLines(), file2.getLines()
 			).filter(
@@ -157,14 +126,62 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 			() -> null);
 	}
 
+	private <T> T getContent(String url, Function<Document, T> function) {
+		return function.apply(getDocument(url));
+	}
+
 	private String getDirectoryCssQuery(String name, String branch) {
 		return String.format(DIRECTORY_CSS_QUERY, name, branch);
 	}
 
-	private Document getDocument(String url) {
-		queuedURLs.computeIfAbsent(url, this::createListenableFutureProject);
+	private List<File> getDirectoryFiles(
+		String name, Document document, String branch) {
 
-		return gitHubCrawlerServiceImpl.retrieveDocumentCache(url);
+		return document.select(
+			getDirectoryCssQuery(name, branch)
+		).parallelStream(
+		).map(
+			directoryElement -> {
+				String directoryURL = directoryElement.attr("abs:href");
+
+				return getFiles(
+					name, getDocument(directoryURL),
+					directoryURL.substring(
+						directoryURL.indexOf(name + "/tree/") + name.length() +
+							6)
+				).parallelStream(
+				).collect(
+					Collectors.toList()
+				);
+			}
+		).flatMap(
+			List::parallelStream
+		).collect(
+			Collectors.toList()
+		);
+	}
+
+	private Document getDocument(String url) {
+		return retry(
+			() -> {
+				try {
+					return Jsoup.connect(
+						url
+					).timeout(
+						3000
+					).followRedirects(
+						false
+					).get();
+				}
+				catch (HttpStatusException e) {
+					if (e.getStatusCode() == HttpStatus.NOT_FOUND.value()) {
+						return null;
+					}
+
+					throw e;
+				}
+			},
+			() -> null);
 	}
 
 	private String getExtension(String fileName) {
@@ -184,52 +201,30 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 			return Collections.emptyList();
 		}
 
-		Map<String, File> files = new HashMap<>();
+		ListenableFuture<List<File>> directoryFilesFuture =
+			executorService.submit(
+				() -> getDirectoryFiles(name, document, branch));
 
-		Elements directoryElements = document.select(
-			getDirectoryCssQuery(name, branch));
+		ListenableFuture<List<File>> treeFilesFuture = executorService.submit(
+			() -> getTreeFiles(name, document, branch));
 
-		for (Element directoryElement : directoryElements) {
-			String directoryURL = directoryElement.attr("abs:href");
-
-			files = files.entrySet(
-			).stream(
+		try {
+			return Stream.concat(
+				directoryFilesFuture.get(
+				).parallelStream(),
+				treeFilesFuture.get(
+				).parallelStream()
 			).collect(
-				Collectors.toMap(
-					Map.Entry::getKey, Map.Entry::getValue,
-					fileBinaryOperator(),
-					() -> getFiles(
-						name, getDocument(directoryURL),
-						directoryURL.substring(
-							directoryURL.indexOf(name + "/tree/") +
-								name.length() + 6)
-					).stream(
-					).collect(
-						Collectors.toMap(
-							File::getExtension, Function.identity())
-					))
+				Collectors.collectingAndThen(
+					Collectors.toMap(
+						File::getExtension, Function.identity(),
+						fileBinaryOperator()),
+					map -> new ArrayList<>(map.values()))
 			);
 		}
-
-		Elements fileElements = document.select(getFileCssQuery(name, branch));
-
-		for (Element fileElement : fileElements) {
-			String fileURL = fileElement.attr("abs:href");
-
-			Long lines = getLines(fileURL);
-
-			String fileName = fileElement.attr("title");
-
-			String extension = getExtension(fileName);
-
-			Long bytes = getBytes(name, branch, fileName);
-
-			files.merge(
-				extension, new File(bytes, extension, lines),
-				fileBinaryOperator());
+		catch (ExecutionException | InterruptedException e) {
+			return Collections.emptyList();
 		}
-
-		return new ArrayList<>(files.values());
 	}
 
 	private String getHashCssQuery(String name) {
@@ -237,50 +232,71 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 	}
 
 	private Long getLines(String fileURL) {
-		Document document = getDocument(fileURL);
+		return retry(
+			() -> getContent(
+				fileURL,
+				document -> {
+					Element fileLinesElement = document.selectFirst(
+						FILE_LINES_CSS_QUERY);
 
-		if (document != null) {
-			Element fileLinesElement = document.selectFirst(
-				FILE_LINES_CSS_QUERY);
+					if (fileLinesElement != null) {
+						String lines = fileLinesElement.text();
 
-			if (fileLinesElement != null) {
-				String lines = fileLinesElement.text();
+						if (lines.indexOf(" lines") > -1) {
+							lines = lines.substring(0, lines.indexOf(" lines"));
 
-				if (lines.indexOf(" lines") > -1) {
-					lines = lines.substring(0, lines.indexOf(" lines"));
+							if (lines.lastIndexOf(" ") > -1) {
+								lines = lines.substring(
+									lines.lastIndexOf(" ") + 1);
+							}
 
-					if (lines.lastIndexOf(" ") > -1) {
-						lines = lines.substring(lines.lastIndexOf(" ") + 1);
+							return Long.valueOf(lines);
+						}
+						else if ((lines.indexOf("Bytes") > -1) ||
+								 (lines.indexOf("KB") > -1) ||
+								 (lines.indexOf("MB") > -1)) {
+
+							return null;
+						}
 					}
 
-					return Long.valueOf(lines);
-				}
-			}
-		}
-
-		return null;
+					throw new RuntimeException();
+				}),
+			() -> null);
 	}
 
 	private String getRepositoryURL(String name) {
 		return String.format(GIT_HUB_URL, name);
 	}
 
-	@CachePut
-	private Document retrieveDocument(String url) {
-		return retry(
-			() -> Jsoup.connect(
-				url
-			).timeout(
-				3000
-			).followRedirects(
-				false
-			).get(),
-			() -> null);
-	}
+	private List<File> getTreeFiles(
+		String name, Document document, String branch) {
 
-	@Cacheable
-	private Document retrieveDocumentCache(String url) {
-		return gitHubCrawlerServiceImpl.retrieveDocument(url);
+		return document.select(
+			getFileCssQuery(name, branch)
+		).parallelStream(
+		).map(
+			fileElement -> {
+				ListenableFuture<Long> linesFuture = executorService.submit(
+					() -> getLines(fileElement.attr("abs:href")));
+
+				String fileName = fileElement.attr("title");
+
+				ListenableFuture<Long> bytesFuture = executorService.submit(
+					() -> getBytes(name, branch, fileName));
+
+				try {
+					return new File(
+						bytesFuture.get(), 1L, getExtension(fileName),
+						linesFuture.get());
+				}
+				catch (ExecutionException | InterruptedException exception) {
+					throw new RuntimeException(exception);
+				}
+			}
+		).collect(
+			Collectors.toList()
+		);
 	}
 
 	private <T> T retry(Callable<T> callable, Callable<T> callBack) {
@@ -297,7 +313,7 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 					}
 				}
 
-				Thread.sleep(2000);
+				Thread.sleep(100);
 			}
 			catch (Exception e) {
 				logger.error("Exception occured : {}", e);
@@ -328,11 +344,5 @@ public class GitHubCrawlerServiceImpl implements CrawlerService {
 
 	private final ListeningExecutorService executorService =
 		MoreExecutors.listeningDecorator(Executors.newCachedThreadPool());
-
-	@Autowired
-	private GitHubCrawlerServiceImpl gitHubCrawlerServiceImpl;
-
-	private final Map<String, ListenableFuture<Document>> queuedURLs =
-		new ConcurrentHashMap<>();
 
 }

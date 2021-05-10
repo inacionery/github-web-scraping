@@ -37,42 +37,6 @@ import org.springframework.test.web.servlet.MockMvc;
 public class FileControllerTest {
 
 	@Test
-	public void shouldReturnAccepted() throws Exception {
-		given(
-			crawlerService.getHash("inacionery/github-web-scraping")
-		).willReturn(
-			"c01d29e0b02c33712c73ee6af81150c209b91541"
-		);
-
-		given(
-			projectService.getProject("inacionery/github-web-scraping")
-		).willReturn(
-			null
-		);
-
-		mockMvc.perform(
-			get(
-				"/files"
-			).param(
-				"name", "inacionery/github-web-scraping"
-			).contentType(
-				MediaType.APPLICATION_JSON
-			)
-		).andExpect(
-			status().isAccepted()
-		);
-
-		verify(
-			projectService, VerificationModeFactory.times(1)
-		).getProject(
-			"inacionery/github-web-scraping"
-		);
-
-		reset(crawlerService);
-		reset(projectService);
-	}
-
-	@Test
 	public void shouldReturnBadRequest() throws Exception {
 		given(
 			crawlerService.getHash("inacionery/github-web-scraping")
@@ -98,7 +62,7 @@ public class FileControllerTest {
 	@Test
 	public void shouldReturnOk() throws Exception {
 		Project project = new Project(
-			Collections.singletonList(new File(15835L, "java", 738L)),
+			Collections.singletonList(new File(15835L, 2L, "java", 738L)),
 			"c01d29e0b02c33712c73ee6af81150c209b91541",
 			"inacionery/github-web-scraping");
 
@@ -128,6 +92,8 @@ public class FileControllerTest {
 			jsonPath("$", hasSize(1))
 		).andExpect(
 			jsonPath("$[0].bytes", is(15835))
+		).andExpect(
+			jsonPath("$[0].count", is(2))
 		).andExpect(
 			jsonPath("$[0].extension", is("java"))
 		).andExpect(

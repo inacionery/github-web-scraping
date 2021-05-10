@@ -36,13 +36,14 @@ public class FileController {
 
 		Project project = _projectService.getProject(name);
 
-		if ((project != null) && Objects.equals(hash, project.getHash())) {
-			return new ResponseEntity<>(project.getFiles(), HttpStatus.OK);
+		if ((project == null) || !Objects.equals(hash, project.getHash())) {
+			project = _projectService.addProject(name);
+		}
+		else {
+			_projectService.updateProject(name);
 		}
 
-		_projectService.saveProject(name);
-
-		return new ResponseEntity<>("Scraping on " + name, HttpStatus.ACCEPTED);
+		return new ResponseEntity<>(project.getFiles(), HttpStatus.OK);
 	}
 
 	@Autowired
